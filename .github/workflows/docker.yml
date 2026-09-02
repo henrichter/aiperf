@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Docker
+
+# Builds the AIPerf runtime image (Dockerfile target `runtime`) and pushes it
+# to GHCR on main pushes and v* tags. Pull requests (including fork PRs) and
+# manual dispatches build without pushing. From a fork, the image lands in the
+# fork's own GHCR package: ghcr.io/<owner>/aiperf.
+
+"on":
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - '*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    uses: docker/github-builder/.github/workflows/build.yml@v1
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      output: image
+      push: ${{ github.event_name != 'pull_request' }}
+      platforms: linux/amd64,linux/arm64
+      target: runtime
+      cache: true
+      cache-mode: max
+      meta-images: ghcr.io/${{ github.repository }}
+      meta-tags: |
+        type=ref,event=branch
+        type=ref,event=tag
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=sha,format=short
+        type=raw,value=latest,enable={{is_default_branch}}
+    secrets:
+      registry-auths: |
+        - registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}

@@ -831,9 +831,10 @@ custom_dataset_loader:
     description: |
       Weka KV-cache-tester agentic coding trace loader. Replays real Claude
       Code sessions with preserved per-request hash_ids, timing, and subagent
-      topology. Input is either a single trace JSON file or a directory of
-      per-conversation JSON files. Subagent entries spawn concurrent child
-      sessions via SPAWN + SPAWN_JOIN prerequisites.
+      topology. Input is a single trace JSON file, a JSONL file with one trace
+      per line, or a directory of per-conversation JSON/JSONL files. Subagent
+      entries spawn concurrent child sessions via SPAWN + SPAWN_JOIN
+      prerequisites.
       Usage: --custom-dataset-type weka_trace --input-file path/to/traces/
     metadata:
       is_trace: true

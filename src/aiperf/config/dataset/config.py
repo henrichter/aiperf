@@ -306,7 +306,7 @@ class FileDataset(BaseConfig):
             "Can be absolute or relative. Mutually exclusive with `records:`. "
             "Supported formats depend on the format field: "
             "JSONL for single_turn/multi_turn, JSONL trace files for mooncake_trace/"
-            "bailian_trace, Parquet for baseten_trace, directories for random_pool.",
+            "bailian_trace/weka_trace, Parquet for baseten_trace, directories for random_pool.",
         ),
     ]
 

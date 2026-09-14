@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """WekaTraceLoader: native AIPerf loader for kv-cache-tester agentic traces.
 
-Accepts a single JSON file or a directory of per-conversation JSON files.
-Each trace emits one root Conversation plus one or more child Conversations
-per ``type: "subagent"`` entry (hash-id LCP chain detection runs nested on
-the entry's inner requests; see :func:`_expand_subagent_to_child_plans`),
-linked via SPAWN + SPAWN_JOIN prerequisites.
+Accepts a single JSON file, a single JSONL file (one trace per line), or a
+directory of per-conversation JSON/JSONL files. Each trace emits one root
+Conversation plus one or more child Conversations per ``type: "subagent"``
+entry (hash-id LCP chain detection runs nested on the entry's inner
+requests; see :func:`_expand_subagent_to_child_plans`), linked via SPAWN +
+SPAWN_JOIN prerequisites.
 """
 
 from __future__ import annotations
@@ -922,7 +923,7 @@ class WekaTraceLoader(HashIdsPromptSynthesisMixin, BaseFileLoader):
     Usage::
 
         loader = WekaTraceLoader(
-            filename="/path/to/traces/",  # file or directory of *.json
+            filename="/path/to/traces/",  # .json, .jsonl, or directory of both
             run=run,
             prompt_generator=prompt_generator,  # required for token replay
         )
@@ -1078,10 +1079,11 @@ class WekaTraceLoader(HashIdsPromptSynthesisMixin, BaseFileLoader):
         data: dict[str, Any] | None = None,
         filename: str | Path | None = None,
     ) -> bool:
-        """Return True when ``filename`` is a Weka JSON file or a directory of them.
+        """Return True when ``filename`` is a Weka JSON/JSONL file or a directory of them.
 
-        Directory detection is single-probe (matches ``RandomPoolDatasetLoader``)
-        so plugin auto-detection stays O(1) on 739-file corpora.
+        ``.jsonl`` files hold one trace per line. Directory detection is
+        single-probe (matches ``RandomPoolDatasetLoader``) so plugin
+        auto-detection stays O(1) on 739-file corpora.
         """
         if filename is None:
             return False
@@ -1091,7 +1093,10 @@ class WekaTraceLoader(HashIdsPromptSynthesisMixin, BaseFileLoader):
                 # Sort for deterministic single-probe behavior; raw ``glob``
                 # iteration order is filesystem-dependent (ext4 returns hash
                 # order, not alphabetical).
-                first = next(iter(sorted(path.glob("*.json"))), None)
+                first = next(
+                    iter(sorted([*path.glob("*.json"), *path.glob("*.jsonl")])),
+                    None,
+                )
                 return first is not None and cls._probe_file(first)
             return cls._probe_file(path)
         except Exception as e:
@@ -1100,11 +1105,21 @@ class WekaTraceLoader(HashIdsPromptSynthesisMixin, BaseFileLoader):
 
     @classmethod
     def _probe_file(cls, path: Path) -> bool:
-        if not path.is_file() or path.suffix != ".json":
+        if not path.is_file():
             return False
         try:
-            blob = orjson.loads(path.read_bytes())
-        except orjson.JSONDecodeError:
+            # orjson.JSONDecodeError subclasses ValueError
+            if path.suffix == ".json":
+                blob = orjson.loads(path.read_bytes())
+            elif path.suffix == ".jsonl":
+                with open(path, encoding="utf-8") as f:
+                    line = next((ln for ln in f if ln.strip()), None)
+                if line is None:
+                    return False
+                blob = orjson.loads(line)
+            else:
+                return False
+        except (OSError, ValueError):
             return False
         if not isinstance(blob, dict):
             return False
@@ -1117,7 +1132,7 @@ class WekaTraceLoader(HashIdsPromptSynthesisMixin, BaseFileLoader):
     def load_dataset(self) -> dict[str, list[WekaTrace]]:
         """Parse every Weka trace file and return ``{trace_id: [WekaTrace]}``.
 
-        The list is always length 1 — each file is its own conversation; the
+        The list is always length 1 — each trace is its own conversation; the
         shape matches the ``dict[str, list[T]]`` contract used by Mooncake /
         Bailian loaders.
         """
@@ -1130,13 +1145,13 @@ class WekaTraceLoader(HashIdsPromptSynthesisMixin, BaseFileLoader):
         log_every = max(1, n // 10)
         data: dict[str, list[WekaTrace]] = {}
         for i, path in enumerate(files, 1):
-            trace = self._load_single_file(path)
-            if trace.id in data:
-                raise ValueError(
-                    f"Duplicate trace id '{trace.id}' in directory: "
-                    f"'{path}' conflicts with a prior file"
-                )
-            data[trace.id] = [trace]
+            for trace in self._load_traces_from_file(path):
+                if trace.id in data:
+                    raise ValueError(
+                        f"Duplicate trace id '{trace.id}' in directory: "
+                        f"'{path}' conflicts with a prior file"
+                    )
+                data[trace.id] = [trace]
             if i % log_every == 0 and i != n:
                 _logger.info(
                     f"WekaTraceLoader: parsed {i}/{n} trace files "
@@ -1155,20 +1170,33 @@ class WekaTraceLoader(HashIdsPromptSynthesisMixin, BaseFileLoader):
                 "delegated reconstruction from a public HF source)."
             )
         if self._path.is_dir():
-            return sorted(self._path.glob("*.json"))
+            return sorted([*self._path.glob("*.json"), *self._path.glob("*.jsonl")])
         return [self._path]
 
-    def _load_single_file(self, path: Path) -> WekaTrace:
-        try:
-            blob = orjson.loads(path.read_bytes())
-        except orjson.JSONDecodeError as e:
-            raise ValueError(f"{path}: invalid JSON: {e}") from e
-        try:
-            return WekaTrace.model_validate(blob)
-        except ValidationError as e:
-            raise ValueError(
-                f"{path}: file is JSON but does not match the Weka trace schema: {e}"
-            ) from e
+    def _load_traces_from_file(self, path: Path) -> list[WekaTrace]:
+        """Load one file's traces: a single trace for ``.json``, one per line for ``.jsonl``."""
+        if path.suffix == ".jsonl":
+            located = (
+                (f"{path}:{lineno}", record)
+                for lineno, record in enumerate(
+                    self._iter_record_dicts(source=path), start=1
+                )
+            )
+        else:
+            try:
+                blob = orjson.loads(path.read_bytes())
+            except orjson.JSONDecodeError as e:
+                raise ValueError(f"{path}: invalid JSON: {e}") from e
+            located = ((f"{path}", blob),)
+        traces = []
+        for loc, record in located:
+            try:
+                traces.append(WekaTrace.model_validate(record))
+            except ValidationError as e:
+                raise ValueError(
+                    f"{loc}: record does not match the Weka trace schema: {e}"
+                ) from e
+        return traces
 
     def _request_passes_filters(self, req: _NormalRequestT) -> bool:
         # fixed_schedule_*_offset are in milliseconds (per input_config.py);

@@ -11,7 +11,7 @@ from scipy import stats
 
 from aiperf.common import random_generator as rng
 from aiperf.common.constants import NANOS_PER_SECOND
-from aiperf.common.enums import CreditPhase
+from aiperf.common.enums import CacheBustTarget, CreditPhase
 from aiperf.plugin.enums import ArrivalPattern, TimingMode
 from aiperf.timing.config import CreditPhaseConfig
 from aiperf.timing.intervals import (
@@ -340,3 +340,64 @@ class TestConstantArrival:
         )
         await h.run_with_auto_return()
         assert len(h.sent_credits) == 2
+
+
+class TestRateCacheBustMarkers:
+    def _strategy(
+        self, target: CacheBustTarget, conversation_source: MagicMock
+    ) -> RequestRateStrategy:
+        run = MagicMock()
+        run.cfg.get_cache_bust_target.return_value = target
+        run.benchmark_id = "bench1"
+        config = CreditPhaseConfig(
+            phase=CreditPhase.PROFILING,
+            timing_mode=TimingMode.REQUEST_RATE,
+            concurrency=1,
+            request_rate=10.0,
+            total_expected_requests=10,
+        )
+        return RequestRateStrategy(
+            config=config,
+            conversation_source=conversation_source,
+            scheduler=MagicMock(),
+            stop_checker=MagicMock(),
+            credit_issuer=MagicMock(),
+            lifecycle=MagicMock(),
+            run=run,
+        )
+
+    def test_new_sessions_mint_distinct_markers(self) -> None:
+        """Recycled traces replay distinct bytes under rate-based load."""
+        sessions = []
+        for _ in range(2):
+            session = MagicMock()
+            session.conversation_id = "traceA"
+            sessions.append(session)
+        conversation_source = MagicMock()
+        conversation_source.next.side_effect = sessions
+        strategy = self._strategy(
+            CacheBustTarget.FIRST_TURN_PREFIX, conversation_source
+        )
+
+        first = strategy._new_session_turn()
+        second = strategy._new_session_turn()
+
+        assert sessions[0].cache_bust_marker is not None
+        assert sessions[0].cache_bust_marker != sessions[1].cache_bust_marker
+        assert sessions[0].cache_bust_target == CacheBustTarget.FIRST_TURN_PREFIX
+        assert sessions[1].cache_bust_target == CacheBustTarget.FIRST_TURN_PREFIX
+        assert first is sessions[0].build_first_turn.return_value
+        assert second is sessions[1].build_first_turn.return_value
+
+    def test_disabled_cache_bust_leaves_marker_none(self) -> None:
+        """Target NONE stays a no-op (marker builder returns None)."""
+        session = MagicMock()
+        session.conversation_id = "traceA"
+        conversation_source = MagicMock()
+        conversation_source.next.return_value = session
+        strategy = self._strategy(CacheBustTarget.NONE, conversation_source)
+
+        strategy._new_session_turn()
+
+        assert session.cache_bust_marker is None
+        assert session.cache_bust_target == CacheBustTarget.NONE

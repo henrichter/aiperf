@@ -9,15 +9,18 @@ import time
 from typing import TYPE_CHECKING
 
 from aiperf.common.constants import MILLIS_PER_SECOND, NANOS_PER_SECOND
+from aiperf.common.enums import CacheBustTarget
 from aiperf.common.mixins import AIPerfLoggerMixin
 from aiperf.common.utils import yield_to_event_loop
 from aiperf.credit.structs import Credit, TurnToSend
 from aiperf.plugin import plugins
 from aiperf.plugin.enums import PluginType
 from aiperf.timing.intervals import IntervalGeneratorConfig
+from aiperf.timing.strategies.cache_bust import build_cache_bust_marker
 
 if TYPE_CHECKING:
     from aiperf.common.loop_scheduler import LoopScheduler
+    from aiperf.config.resolution.plan import BenchmarkRun
     from aiperf.credit.issuer import CreditIssuer
     from aiperf.timing.branch_orchestrator import BranchOrchestrator
     from aiperf.timing.config import CreditPhaseConfig
@@ -93,6 +96,7 @@ class RequestRateStrategy(AIPerfLoggerMixin):
         credit_issuer: CreditIssuer,
         lifecycle: PhaseLifecycle,
         branch_orchestrator: BranchOrchestrator | None = None,
+        run: BenchmarkRun | None = None,
         **kwargs,
     ):
         """Initialize rate timing strategy with all dependencies."""
@@ -104,6 +108,11 @@ class RequestRateStrategy(AIPerfLoggerMixin):
         self._credit_issuer = credit_issuer
         self._lifecycle = lifecycle
         self._branch_orchestrator = branch_orchestrator
+        self._cache_bust_target: CacheBustTarget = (
+            run.cfg.get_cache_bust_target() if run is not None else CacheBustTarget.NONE
+        )
+        self._benchmark_id: str = run.benchmark_id if run is not None else "unknown"
+        self._session_seq: int = 0
 
         # Queue for subsequent turns (turn_index > 0) waiting to be issued.
         # Populated by handle_credit_return when workers complete turns.
@@ -125,6 +134,26 @@ class RequestRateStrategy(AIPerfLoggerMixin):
         """Setup the phase."""
         pass  # Already setup in __init__
 
+    def _new_session_turn(self) -> TurnToSend:
+        """Sample a new session and build its first turn with a fresh marker.
+
+        Each session mints a distinct cache-bust marker (monotonic per-run
+        sequence in the digest) so recycled traces replay distinct bytes.
+        Continuations reuse it via ``TurnToSend.from_previous_credit``.
+        No-op when cache-bust is disabled.
+        """
+        session = self._conversation_source.next()
+        self._session_seq += 1
+        session.cache_bust_marker = build_cache_bust_marker(
+            self._benchmark_id,
+            self._session_seq,
+            0,
+            session.conversation_id,
+            target=self._cache_bust_target,
+        )
+        session.cache_bust_target = self._cache_bust_target
+        return session.build_first_turn()
+
     async def execute_phase(self) -> None:
         """Execute request rate main loop until stop condition reached.
 
@@ -144,7 +173,7 @@ class RequestRateStrategy(AIPerfLoggerMixin):
         next_target_perf = perf_start + self._rate_generator.next_interval()
 
         # The first turn of the next new session. Cached to avoid wasting samples from shuffle/sequential samplers.
-        next_new_session_turn = self._conversation_source.next().build_first_turn()
+        next_new_session_turn = self._new_session_turn()
 
         while True:
             now = time.perf_counter()
@@ -206,9 +235,7 @@ class RequestRateStrategy(AIPerfLoggerMixin):
                 match result:
                     case True:  # Successfully issued credit
                         # Re-sample the next new turn for the next interval.
-                        next_new_session_turn = (
-                            self._conversation_source.next().build_first_turn()
-                        )
+                        next_new_session_turn = self._new_session_turn()
                     case False:  # Stop condition reached
                         self.debug(
                             "Exiting: stop condition reached after try_issue_credit"

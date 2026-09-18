@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The cache-bust compatibility lockdown rejects a non-NONE cache_bust target paired with a non-agentic timing mode or a non-chat/responses endpoint."""
+"""The cache-bust compatibility lockdown rejects a non-NONE cache_bust target paired with an incompatible timing mode or a non-chat/responses endpoint."""
 
 from __future__ import annotations
 
@@ -64,8 +64,10 @@ _NON_NONE_CACHE_BUST_TARGETS: list[CacheBustTarget] = [
     t for t in CacheBustTarget if t != CacheBustTarget.NONE
 ]
 
-_NON_AGENTIC_TIMING_MODES: list[TimingMode] = [
-    m for m in TimingMode if m != TimingMode.AGENTIC_REPLAY
+_INCOMPATIBLE_TIMING_MODES: list[TimingMode] = [
+    m
+    for m in TimingMode
+    if m not in {TimingMode.AGENTIC_REPLAY, TimingMode.REQUEST_RATE}
 ]
 
 _INCOMPATIBLE_ENDPOINT_TYPES: list[EndpointType] = [
@@ -73,12 +75,12 @@ _INCOMPATIBLE_ENDPOINT_TYPES: list[EndpointType] = [
 ]
 
 
-@pytest.mark.parametrize("timing_mode", _NON_AGENTIC_TIMING_MODES)
+@pytest.mark.parametrize("timing_mode", _INCOMPATIBLE_TIMING_MODES)
 @pytest.mark.parametrize("target", _NON_NONE_CACHE_BUST_TARGETS)
 def test_cache_bust_rejected_with_every_non_agentic_timing_mode(
     timing_mode: TimingMode, target: CacheBustTarget
 ) -> None:
-    """Every non-agentic TimingMode paired with a non-NONE cache_bust target raises."""
+    """Every incompatible TimingMode paired with a non-NONE cache_bust target raises."""
     with pytest.raises(ValueError, match="agentic_replay"):
         _build(
             target=target,
@@ -124,7 +126,7 @@ def test_unsafe_override_does_not_bypass_cache_bust_validation() -> None:
                 "type": "concurrency",
                 "concurrency": 1,
                 "requests": 10,
-                "timing_mode": TimingMode.REQUEST_RATE,
+                "timing_mode": TimingMode.FIXED_SCHEDULE,
             }
         ],
     }
@@ -206,3 +208,19 @@ def test_cache_bust_all_targets_construct_with_chat_endpoint_and_agentic_replay(
     assert cfg.get_cache_bust_target() == target
     assert cfg.endpoint.type == endpoint_type
     assert cfg.get_profiling_phases()[0].timing_mode == TimingMode.AGENTIC_REPLAY
+
+
+@pytest.mark.parametrize("target", _NON_NONE_CACHE_BUST_TARGETS)
+@pytest.mark.parametrize("endpoint_type", [EndpointType.CHAT, EndpointType.RESPONSES])
+def test_cache_bust_all_targets_construct_with_chat_endpoint_and_request_rate(
+    target: CacheBustTarget, endpoint_type: EndpointType
+) -> None:
+    """Every non-NONE CacheBustTarget constructs with the compatible rate-based + chat/responses combo."""
+    cfg = _build(
+        target=target,
+        endpoint_type=endpoint_type,
+        timing_mode=TimingMode.REQUEST_RATE,
+    )
+    assert cfg.get_cache_bust_target() == target
+    assert cfg.endpoint.type == endpoint_type
+    assert cfg.get_profiling_phases()[0].timing_mode == TimingMode.REQUEST_RATE

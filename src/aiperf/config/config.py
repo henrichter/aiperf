@@ -545,11 +545,12 @@ class BenchmarkConfig(BaseConfig, BenchmarkHelpersMixin):
     def validate_cache_bust_compatibility(self) -> Self:
         """Refuse cache-bust on incompatible timing modes / endpoint types.
 
-        Marker minting only fires in the agentic-replay strategy and only the
-        chat / responses endpoint formatters consume the system-message field
-        that hosts the marker. Any other combination silently drops the marker
-        and would produce a benchmark that looks normal but exercises no cache-
-        busting at all — refuse loudly at config time.
+        Marker minting fires in the agentic-replay strategy and the rate-based
+        strategy, and only the chat / responses endpoint formatters consume
+        the system-message field that hosts the marker. Any other combination
+        silently drops the marker and would produce a benchmark that looks
+        normal but exercises no cache-busting at all — refuse loudly at
+        config time.
 
         Pure validation: this RAISES only, never mutates (per the v2 resolver
         convention that cross-cutting config mutation belongs in a
@@ -588,12 +589,14 @@ class BenchmarkConfig(BaseConfig, BenchmarkHelpersMixin):
         ]
         if not explicit_timing_modes:
             return self
-        if TimingMode.AGENTIC_REPLAY not in explicit_timing_modes:
+        allowed = {TimingMode.AGENTIC_REPLAY, TimingMode.REQUEST_RATE}
+        if not any(mode in allowed for mode in explicit_timing_modes):
             raise ValueError(
-                "cache-bust requires the agentic_replay timing mode "
-                "(set today by --scenario inferencex-agentx-mvp); the profiling "
-                "phase(s) are not agentic_replay. Cache-bust marker minting is "
-                "only implemented for agentic_replay."
+                "cache-bust requires the agentic_replay or rate-based timing "
+                "mode (set today by --scenario inferencex-agentx-mvp or a "
+                "rate/concurrency phase); the profiling phase(s) are neither. "
+                "Cache-bust marker minting is only implemented for "
+                "agentic_replay and rate-based strategies."
             )
 
         if self.endpoint.type not in {EndpointType.CHAT, EndpointType.RESPONSES}:
